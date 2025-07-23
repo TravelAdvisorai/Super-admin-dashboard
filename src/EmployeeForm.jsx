@@ -240,7 +240,6 @@ export default function EmployeeForm({ organizationId, orgStructure, role }) {
                             placeholder="Email"
                             value={form.email}
                             onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
-                            disabled={true}
                         />
                         <select
                             className="bg-gray-800 text-gray-100 p-2 border border-gray-700"
