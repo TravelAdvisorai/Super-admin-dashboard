@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import StructureListItem from "./StructureListItem";
 import { useAuth } from "./AuthContext";
 import { db } from "./firebase";
-import { collection, getDocs, updateDoc, doc, setDoc, addDoc, deleteDoc } from "firebase/firestore";
+import { collection, getDocs, updateDoc, doc, setDoc, addDoc, deleteDoc, getDoc } from "firebase/firestore";
 // Recursively delete all subcollections and documents for a given docRef
 async function deleteCollectionRecursive(colRef) {
   const snap = await getDocs(colRef);
@@ -220,22 +220,48 @@ export default function SuperAdminDashboard() {
             <button
               className="bg-blue-900 hover:bg-blue-800 text-blue-100 px-4 py-2 rounded w-full font-semibold transition border border-blue-700"
               onClick={async () => {
-                if (!newOrgId || !newOrgName) return;
-                setCreatingOrg(true);
-                try {
-                  await setDoc(doc(db, "organizations", newOrgId), { name: newOrgName });
-                  // Reload orgs from Firestore to ensure consistency
-                  const snap = await getDocs(collection(db, "organizations"));
-                  setOrgs(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-                  setShowCreateOrgModal(false);
-                  setSelectedOrg(newOrgId); // Auto-select new org
-                  setStructures([]); // Reset structures for new org
-                } catch (err) {
-                  alert("Failed to create organization: " + (err && err.message ? err.message : err));
-                } finally {
-                  setCreatingOrg(false);
-                }
-              }}
+    if (!newOrgId || !newOrgName) {
+      setOrgError("Both Organization ID and Name are required.");
+      return;
+    }
+    if (/\s/.test(newOrgId)) {
+      setOrgError("Organization ID cannot contain spaces.");
+      return;
+    }
+    setCreatingOrg(true);
+    try {
+      // ADDED: Create a reference to the document location.
+      const orgDocRef = doc(db, "organizations", newOrgId);
+      
+      // ADDED: Fetch the document snapshot to check if it exists.
+      const orgDocSnap = await getDoc(orgDocRef);
+
+      // ADDED: If the document exists, set an error and stop the process.
+      if (orgDocSnap.exists()) {
+        setOrgError("Organization ID already exists. Please use a unique ID.");
+        return; // Stop the function here
+      }
+
+      // If the ID is unique, proceed to create the new organization
+      // Note: We reuse orgDocRef from the check above.
+      await setDoc(orgDocRef, { name: newOrgName });
+      
+      // Reload orgs from Firestore to ensure consistency
+      const snap = await getDocs(collection(db, "organizations"));
+      setOrgs(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      setShowCreateOrgModal(false);
+      setSelectedOrg(newOrgId); // Auto-select new org
+      setStructures([]); // Reset structures for new org
+      setOrgError("");
+    } catch (err) {
+      console.error("Failed to create organization:", err);
+      setOrgError("Failed to create organization: " + (err && err.message ? err.message : err));
+    } finally {
+      // ADDED: This block now correctly handles resetting the loading state
+      // even if we exit early from the uniqueness check.
+      setCreatingOrg(false);
+    }
+  }}
               disabled={creatingOrg || !newOrgId || !newOrgName}
             >
               {creatingOrg ? 'Creating...' : 'Create Organization'}
