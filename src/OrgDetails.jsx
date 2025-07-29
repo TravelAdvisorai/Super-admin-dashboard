@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { db } from "./firebase";
-import { doc, getDoc, setDoc, updateDoc, deleteDoc, collection, getDocs, query, where } from "firebase/firestore";
+import { doc, getDoc, setDoc, updateDoc, deleteDoc, collection, getDocs, query, where, writeBatch } from "firebase/firestore";
 import { toast } from 'react-toastify';
 
 const DEFAULT_CONFIG = {
@@ -80,29 +80,38 @@ export default function OrgDetails({ organizationId, orgStructure, onBack, role 
         }
         setDeleting(true);
         try {
-            // Delete all employees in /organizations/{organizationId}/orgStructures/{orgStructureId}/employees
+            const batch = writeBatch(db);
+
+            // Delete all employees in the subcollection
             const employeesRef = collection(db, "organizations", organizationId, "orgStructures", orgStructure.id, "employees");
             const employeesSnap = await getDocs(employeesRef);
-            const employeeDeletes = employeesSnap.docs.map(docSnap => deleteDoc(docSnap.ref));
-            await Promise.all(employeeDeletes);
+            employeesSnap.docs.forEach(docSnap => batch.delete(docSnap.ref));
 
-            // Delete all users in /user_directory with organizationId and orgStructureId
+            // Delete all users from the user_directory
             const usersRef = collection(db, "user_directory");
-            const q = query(usersRef, where("organizationId", "==", organizationId), where("orgStructureId", "==", orgStructure.id));
-            const usersSnap = await getDocs(q);
-            const userDeletes = usersSnap.docs.map(docSnap => deleteDoc(docSnap.ref));
-            await Promise.all(userDeletes);
+            const qUsers = query(usersRef, where("organizationId", "==", organizationId), where("orgStructureId", "==", orgStructure.id));
+            const usersSnap = await getDocs(qUsers);
+            usersSnap.docs.forEach(docSnap => batch.delete(docSnap.ref));
 
-            // Delete the orgStructure config doc
-            await deleteDoc(doc(db, "organizations", organizationId, "orgStructures", orgStructure.id, "config", "main"));
-            // Delete the orgStructure doc
-            await deleteDoc(doc(db, "organizations", organizationId, "orgStructures", orgStructure.id));
+            // **NEW**: Delete all associated travel requests from the root collection
+            const requestsRef = collection(db, "travelRequests");
+            const qRequests = query(requestsRef, where("corporate.organizationId", "==", organizationId), where("corporate.orgStructureId", "==", orgStructure.id));
+            const requestsSnap = await getDocs(qRequests);
+            requestsSnap.docs.forEach(docSnap => batch.delete(docSnap.ref));
 
-            toast.success("Org Structure and all related users deleted.");
+            // Delete the orgStructure config and the orgStructure documents
+            batch.delete(doc(db, "organizations", organizationId, "orgStructures", orgStructure.id, "config", "main"));
+            batch.delete(doc(db, "organizations", organizationId, "orgStructures", orgStructure.id));
+
+            // Commit all batched deletes at once
+            await batch.commit();
+
+            toast.success("Org Structure and all related data deleted.");
             setShowDeleteModal(false);
             setShowConfigModal(false);
             if (onBack) onBack();
-        } catch {
+        } catch(error) {
+            console.error("Deletion failed:", error);
             toast.error("Failed to delete org structure.");
         } finally {
             setDeleting(false);
@@ -111,43 +120,45 @@ export default function OrgDetails({ organizationId, orgStructure, onBack, role 
     }
 
     if (loading) {
-        return <div className="p-10 text-gray-400">Loading org structure config...</div>;
+        return <div className="p-4 sm:p-10 text-gray-400">Loading org structure config...</div>;
     }
 
     return (
-        <div className="w-full flex flex-col gap-8 p-10 bg-gray-900 shadow-md border border-gray-800">
-            <div className="flex items-center gap-4 mb-2">
-                <h2 className="text-3xl font-extrabold text-blue-500 flex items-center gap-2 mb-0">
+        <div className="w-full flex flex-col gap-8 p-4 sm:p-10 bg-gray-900 shadow-md border border-gray-800">
+            <div className="flex flex-wrap items-center gap-4 mb-2">
+                <h2 className="text-2xl sm:text-3xl font-extrabold text-blue-500 flex items-center gap-2 mb-0 w-full sm:w-auto">
                     <span className="inline-block w-3 h-3 bg-blue-700"></span>
                     {config.orgName || orgStructure.name}
                 </h2>
-                {role === 'admin' && (
-                    <button
-                        className="ml-auto px-4 py-1 bg-blue-700 text-white shadow hover:bg-blue-800 transition text-sm font-semibold"
-                        onClick={() => setShowConfigModal(true)}
-                    >
-                        Config
-                    </button>
-                )}
-                {onBack && (
-                    <button
-                        className="px-4 py-1 bg-gray-800 text-gray-200 shadow hover:bg-gray-700 transition text-sm font-semibold"
-                        onClick={onBack}
-                    >
-                        Back
-                    </button>
-                )}
+                <div className="flex gap-2 ml-auto">
+                    {role === 'admin' && (
+                        <button
+                            className="px-4 py-1 bg-blue-700 text-white shadow hover:bg-blue-800 transition text-sm font-semibold"
+                            onClick={() => setShowConfigModal(true)}
+                        >
+                            Config
+                        </button>
+                    )}
+                    {onBack && (
+                        <button
+                            className="px-4 py-1 bg-gray-800 text-gray-200 shadow hover:bg-gray-700 transition text-sm font-semibold"
+                            onClick={onBack}
+                        >
+                            Back
+                        </button>
+                    )}
+                </div>
             </div>
-            <div className="mb-2 text-gray-400 text-sm">
+            <div className="mb-2 text-gray-400 text-sm break-words">
                 <span className="font-semibold text-blue-400">Org Structure ID:</span> {orgStructure.id}
             </div>
 
             {/* Config Modal */}
             {showConfigModal && role === 'admin' && (
-                <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 animate-fade-in">
+                <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 p-4">
                     <form
                         onSubmit={handleSaveConfig}
-                        className="bg-gray-900 p-8 shadow-2xl w-96 border border-gray-700 animate-fade-in"
+                        className="bg-gray-900 p-6 sm:p-8 shadow-2xl w-full max-w-md border border-gray-700 animate-fade-in"
                     >
                         <h3 className="font-bold text-lg mb-4 text-blue-300">Edit Org Structure Config</h3>
                         <div className="space-y-4 mb-4">
@@ -173,10 +184,10 @@ export default function OrgDetails({ organizationId, orgStructure, onBack, role 
                                 </select>
                             </div>
                         </div>
-                        <div className="flex justify-between gap-2 mt-4">
+                        <div className="flex flex-col sm:flex-row justify-between gap-2 mt-4">
                             <button
                                 type="button"
-                                className="px-4 py-2 bg-gray-800 text-gray-200 hover:bg-gray-700 transition"
+                                className="px-4 py-2 bg-gray-800 text-gray-200 hover:bg-gray-700 transition order-3 sm:order-1"
                                 onClick={() => setShowConfigModal(false)}
                                 disabled={savingConfig}
                             >
@@ -184,7 +195,7 @@ export default function OrgDetails({ organizationId, orgStructure, onBack, role 
                             </button>
                             <button
                                 type="button"
-                                className="px-4 py-2 bg-red-700 text-white hover:bg-red-800 transition font-semibold"
+                                className="px-4 py-2 bg-red-700 text-white hover:bg-red-800 transition font-semibold order-2 sm:order-2"
                                 onClick={() => setShowDeleteModal(true)}
                                 disabled={savingConfig}
                             >
@@ -192,7 +203,7 @@ export default function OrgDetails({ organizationId, orgStructure, onBack, role 
                             </button>
                             <button
                                 type="submit"
-                                className="px-4 py-2 bg-blue-700 text-white shadow hover:bg-blue-800 transition font-semibold disabled:opacity-60"
+                                className="px-4 py-2 bg-blue-700 text-white shadow hover:bg-blue-800 transition font-semibold disabled:opacity-60 order-1 sm:order-3"
                                 disabled={savingConfig}
                             >
                                 {savingConfig ? "Saving..." : "Save"}
@@ -203,10 +214,10 @@ export default function OrgDetails({ organizationId, orgStructure, onBack, role 
             )}
             {/* Delete Confirmation Modal */}
             {showDeleteModal && role === 'admin' && (
-                <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 animate-fade-in">
-                    <div className="bg-gray-900 p-8 shadow-2xl w-96 border border-gray-700 animate-fade-in">
+                <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4">
+                    <div className="bg-gray-900 p-6 sm:p-8 shadow-2xl w-full max-w-md border border-gray-700 animate-fade-in">
                         <h3 className="font-bold text-lg mb-4 text-red-400">Delete Org Structure</h3>
-                        <p className="mb-4 text-gray-300">To confirm deletion, enter the org structure ID: <span className="font-mono text-blue-300">{orgStructure.id}</span></p>
+                        <p className="mb-4 text-gray-300 break-words">To confirm deletion, enter the org structure ID: <span className="font-mono text-blue-300">{orgStructure.id}</span></p>
                         <input
                             className="w-full border border-gray-700 px-3 py-2 text-sm bg-gray-800 text-gray-100 mb-4"
                             placeholder="Enter org structure ID to confirm"
@@ -214,16 +225,16 @@ export default function OrgDetails({ organizationId, orgStructure, onBack, role 
                             onChange={e => setDeleteInput(e.target.value)}
                             disabled={deleting}
                         />
-                        <div className="flex justify-between gap-2 mt-4">
+                        <div className="flex flex-col sm:flex-row justify-between gap-2 mt-4">
                             <button
-                                className="px-4 py-2 bg-gray-800 text-gray-200 hover:bg-gray-700 transition"
+                                className="px-4 py-2 bg-gray-800 text-gray-200 hover:bg-gray-700 transition order-2 sm:order-1"
                                 onClick={() => { setShowDeleteModal(false); setDeleteInput(""); }}
                                 disabled={deleting}
                             >
                                 Cancel
                             </button>
                             <button
-                                className="px-4 py-2 bg-red-700 text-white hover:bg-red-800 transition font-semibold"
+                                className="px-4 py-2 bg-red-700 text-white hover:bg-red-800 transition font-semibold order-1 sm:order-2"
                                 onClick={handleDeleteOrgStructure}
                                 disabled={deleting}
                             >
@@ -235,4 +246,4 @@ export default function OrgDetails({ organizationId, orgStructure, onBack, role 
             )}
         </div>
     );
-} 
+}
