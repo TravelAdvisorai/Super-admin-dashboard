@@ -1,140 +1,249 @@
-import React, { useEffect, useState } from "react";
+import React, { useState, useEffect } from "react";
 import { db } from "./firebase";
-import { collection, onSnapshot, setDoc, doc } from "firebase/firestore";
+import { doc, getDoc, setDoc, updateDoc, deleteDoc, collection, getDocs, query, where, writeBatch } from "firebase/firestore";
 import { toast } from 'react-toastify';
-import { useAuth } from './AuthContext';
 
-export default function OrgList({ selectedOrgId, onSelectOrg, role }) {
-    const { organizationId } = useAuth();
-    const [structureList, setStructureList] = useState([]);
-    const [search, setSearch] = useState("");
-    const [showModal, setShowModal] = useState(false);
-    const [form, setForm] = useState({ name: "", id: "" });
-    const [error, setError] = useState("");
+const DEFAULT_CONFIG = {
+    approvalRequired: true,
+    orgName: "",
+};
 
+export default function OrgDetails({ organizationId, orgStructure, onBack, role }) {
+    const [config, setConfig] = useState({ ...DEFAULT_CONFIG, orgName: orgStructure.name });
+    const [loading, setLoading] = useState(true);
+    const [savingConfig, setSavingConfig] = useState(false);
+    const [showConfigModal, setShowConfigModal] = useState(false);
+    const [showDeleteModal, setShowDeleteModal] = useState(false);
+    const [deleteInput, setDeleteInput] = useState("");
+    const [deleting, setDeleting] = useState(false);
+
+    // Fetch config from Firestore when orgStructure changes
     useEffect(() => {
-        if (!organizationId) return;
-        const unsub = onSnapshot(
-            collection(db, "organizations", organizationId, "orgStructures"),
-            (snapshot) => {
-                const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                setStructureList(data);
+        let ignore = false;
+        async function fetchConfig() {
+            setLoading(true);
+            try {
+                const configRef = doc(db, "organizations", organizationId, "orgStructures", orgStructure.id, "config", "main");
+                const configSnap = await getDoc(configRef);
+                if (!ignore) {
+                    if (configSnap.exists()) {
+                        setConfig({ ...DEFAULT_CONFIG, ...configSnap.data(), orgName: orgStructure.name });
+                    } else {
+                        setConfig({ ...DEFAULT_CONFIG, orgName: orgStructure.name });
+                    }
+                }
+            } catch {
+                if (!ignore) {
+                    setConfig({ ...DEFAULT_CONFIG, orgName: orgStructure.name });
+                }
+            } finally {
+                if (!ignore) setLoading(false);
             }
-        );
-        return () => unsub();
-    }, [organizationId]);
+        }
+        fetchConfig();
+        return () => { ignore = true; };
+    }, [organizationId, orgStructure]);
 
-    const filteredStructures = structureList.filter((s) =>
-        s.name?.toLowerCase().includes(search.toLowerCase())
-    );
+    function handleConfigChange(e) {
+        const { name, value } = e.target;
+        setConfig((prev) => ({
+            ...prev,
+            [name]: name === "approvalRequired" ? value === "true" : value,
+        }));
+    }
 
-    async function handleAddStructure(e) {
+    async function handleSaveConfig(e) {
         e.preventDefault();
-        setError("");
-        if (!form.name.trim() || !form.id.trim()) {
-            setError("Both fields are required");
-            toast.error("Both fields are required");
-            return;
-        }
-        if (structureList.some((s) => s.id === form.id)) {
-            setError("Structure ID already exists");
-            toast.error("Structure ID already exists");
-            return;
-        }
+        setSavingConfig(true);
         try {
-            await setDoc(doc(db, "organizations", organizationId, "orgStructures", form.id.trim()), {
-                name: form.name.trim(),
-                id: form.id.trim()
+            const configRef = doc(db, "organizations", organizationId, "orgStructures", orgStructure.id, "config", "main");
+            await setDoc(configRef, {
+                approvalRequired: config.approvalRequired,
+                orgName: config.orgName
             });
-            setShowModal(false);
-            setForm({ name: "", id: "" });
-            setError("");
-            toast.success("Organization structure added successfully!");
+            // Also update the orgStructure document's name
+            const orgStructureDocRef = doc(db, "organizations", organizationId, "orgStructures", orgStructure.id);
+            await updateDoc(orgStructureDocRef, { name: config.orgName });
+            toast.success("Config updated successfully!");
+            setShowConfigModal(false);
         } catch {
-            setError("Failed to add structure");
-            toast.error("Failed to add structure");
+            toast.error("Failed to update config");
+        } finally {
+            setSavingConfig(false);
         }
     }
 
+    async function handleDeleteOrgStructure() {
+        if (deleteInput !== orgStructure.id) {
+            toast.error("Org Structure ID does not match.");
+            return;
+        }
+        setDeleting(true);
+        try {
+            const batch = writeBatch(db);
+
+            // Delete all employees in the subcollection
+            const employeesRef = collection(db, "organizations", organizationId, "orgStructures", orgStructure.id, "employees");
+            const employeesSnap = await getDocs(employeesRef);
+            employeesSnap.docs.forEach(docSnap => batch.delete(docSnap.ref));
+
+            // Delete all users from the user_directory
+            const usersRef = collection(db, "user_directory");
+            const qUsers = query(usersRef, where("organizationId", "==", organizationId), where("orgStructureId", "==", orgStructure.id));
+            const usersSnap = await getDocs(qUsers);
+            usersSnap.docs.forEach(docSnap => batch.delete(docSnap.ref));
+
+            // **NEW**: Delete all associated travel requests from the root collection
+            const requestsRef = collection(db, "travelRequests");
+            const qRequests = query(requestsRef, where("corporate.organizationId", "==", organizationId), where("corporate.orgStructureId", "==", orgStructure.id));
+            const requestsSnap = await getDocs(qRequests);
+            requestsSnap.docs.forEach(docSnap => batch.delete(docSnap.ref));
+
+            // Delete the orgStructure config and the orgStructure documents
+            batch.delete(doc(db, "organizations", organizationId, "orgStructures", orgStructure.id, "config", "main"));
+            batch.delete(doc(db, "organizations", organizationId, "orgStructures", orgStructure.id));
+
+            // Commit all batched deletes at once
+            await batch.commit();
+
+            toast.success("Org Structure and all related data deleted.");
+            setShowDeleteModal(false);
+            setShowConfigModal(false);
+            if (onBack) onBack();
+        } catch(error) {
+            console.error("Deletion failed:", error);
+            toast.error("Failed to delete org structure.");
+        } finally {
+            setDeleting(false);
+            setDeleteInput("");
+        }
+    }
+
+    if (loading) {
+        return <div className="p-4 sm:p-10 text-gray-400">Loading org structure config...</div>;
+    }
+
     return (
-        <div className="bg-gray-900 shadow-md p-4 border-r border-gray-800 min-h-screen">
-            <div className="flex items-center mb-4 gap-2">
-                <input
-                    className="w-full border border-gray-700 px-3 py-2 text-sm bg-gray-800 text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-900"
-                    placeholder="Search org structures..."
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                />
-                {role === 'admin' && (
-                    <button
-                        className="bg-blue-700 text-white px-4 py-2 shadow hover:bg-blue-800 transition text-sm font-semibold"
-                        onClick={() => setShowModal(true)}
-                    >
-                        +
-                    </button>
-                )}
+        <div className="w-full flex flex-col gap-8 p-4 sm:p-10 bg-gray-900 shadow-md border border-gray-800">
+            <div className="flex flex-wrap items-center gap-4 mb-2">
+                <h2 className="text-2xl sm:text-3xl font-extrabold text-blue-500 flex items-center gap-2 mb-0 w-full sm:w-auto">
+                    <span className="inline-block w-3 h-3 bg-blue-700"></span>
+                    {config.orgName || orgStructure.name}
+                </h2>
+                <div className="flex gap-2 ml-auto">
+                    {role === 'admin' && (
+                        <button
+                            className="px-4 py-1 bg-blue-700 text-white shadow hover:bg-blue-800 transition text-sm font-semibold"
+                            onClick={() => setShowConfigModal(true)}
+                        >
+                            Config
+                        </button>
+                    )}
+                    {onBack && (
+                        <button
+                            className="px-4 py-1 bg-gray-800 text-gray-200 shadow hover:bg-gray-700 transition text-sm font-semibold"
+                            onClick={onBack}
+                        >
+                            Back
+                        </button>
+                    )}
+                </div>
             </div>
-            <ul className="space-y-2">
-                {filteredStructures.map((structure) => (
-                    <li
-                        key={structure.id}
-                        className={`p-3 cursor-pointer border transition flex items-center gap-2 shadow-sm animate-slide-in-left ${selectedOrgId === structure.id
-                            ? "bg-blue-900 border-blue-700 font-bold text-blue-200"
-                            : "bg-gray-800 hover:bg-gray-700 border-gray-800 text-gray-100"
-                            }`}
-                        onClick={() => onSelectOrg(structure)}
-                    >
-                        <span className="truncate">{structure.name}</span>
-                    </li>
-                ))}
-                {filteredStructures.length === 0 && (
-                    <li className="text-gray-400 text-sm text-center py-4">No org structures found</li>
-                )}
-            </ul>
-            {showModal && role === 'admin' && (
-                <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
+            <div className="mb-2 text-gray-400 text-sm break-words">
+                <span className="font-semibold text-blue-400">Org Structure ID:</span> {orgStructure.id}
+            </div>
+
+            {/* Config Modal */}
+            {showConfigModal && role === 'admin' && (
+                <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 p-4">
                     <form
-                        className="bg-gray-900 p-8 shadow-2xl w-96 border border-gray-700 animate-fade-in"
-                        onSubmit={handleAddStructure}
+                        onSubmit={handleSaveConfig}
+                        className="bg-gray-900 p-6 sm:p-8 shadow-2xl w-full max-w-md border border-gray-700 animate-fade-in"
                     >
-                        <h3 className="font-bold text-lg mb-4 text-blue-300">Add Org Structure</h3>
-                        <div className="space-y-3 mb-4">
-                            <input
-                                className="w-full border border-gray-700 px-3 py-2 text-sm bg-gray-800 text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-900"
-                                placeholder="Structure Name"
-                                value={form.name}
-                                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                            />
-                            <input
-                                className="w-full border border-gray-700 px-3 py-2 text-sm bg-gray-800 text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-900"
-                                placeholder="Structure ID (unique)"
-                                value={form.id}
-                                onChange={(e) => setForm({ ...form, id: e.target.value })}
-                            />
-                            {error && <div className="text-red-500 text-xs">{error}</div>}
+                        <h3 className="font-bold text-lg mb-4 text-blue-300">Edit Org Structure Config</h3>
+                        <div className="space-y-4 mb-4">
+                            <div>
+                                <label className="block text-sm font-medium text-blue-300 mb-1">Org Structure Name</label>
+                                <input
+                                    className="w-full border border-gray-700 px-3 py-2 text-sm bg-gray-800 text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-900"
+                                    name="orgName"
+                                    value={config.orgName}
+                                    onChange={handleConfigChange}
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-blue-300 mb-1">Approval Required</label>
+                                <select
+                                    className="w-full border border-gray-700 px-3 py-2 text-sm bg-gray-800 text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-900"
+                                    name="approvalRequired"
+                                    value={config.approvalRequired ? "true" : "false"}
+                                    onChange={handleConfigChange}
+                                >
+                                    <option value="true">Yes</option>
+                                    <option value="false">No</option>
+                                </select>
+                            </div>
                         </div>
-                        <div className="flex justify-end gap-2 mt-4">
+                        <div className="flex flex-col sm:flex-row justify-between gap-2 mt-4">
                             <button
                                 type="button"
-                                className="px-4 py-2 bg-gray-800 text-gray-200 hover:bg-gray-700 transition"
-                                onClick={() => {
-                                    setShowModal(false);
-                                    setForm({ name: "", id: "" });
-                                    setError("");
-                                }}
+                                className="px-4 py-2 bg-gray-800 text-gray-200 hover:bg-gray-700 transition order-3 sm:order-1"
+                                onClick={() => setShowConfigModal(false)}
+                                disabled={savingConfig}
                             >
                                 Cancel
                             </button>
                             <button
-                                type="submit"
-                                className="px-4 py-2 bg-blue-700 text-white shadow hover:bg-blue-800 transition font-semibold"
+                                type="button"
+                                className="px-4 py-2 bg-red-700 text-white hover:bg-red-800 transition font-semibold order-2 sm:order-2"
+                                onClick={() => setShowDeleteModal(true)}
+                                disabled={savingConfig}
                             >
-                                Add
+                                Delete Org Structure
+                            </button>
+                            <button
+                                type="submit"
+                                className="px-4 py-2 bg-blue-700 text-white shadow hover:bg-blue-800 transition font-semibold disabled:opacity-60 order-1 sm:order-3"
+                                disabled={savingConfig}
+                            >
+                                {savingConfig ? "Saving..." : "Save"}
                             </button>
                         </div>
                     </form>
                 </div>
             )}
+            {/* Delete Confirmation Modal */}
+            {showDeleteModal && role === 'admin' && (
+                <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4">
+                    <div className="bg-gray-900 p-6 sm:p-8 shadow-2xl w-full max-w-md border border-gray-700 animate-fade-in">
+                        <h3 className="font-bold text-lg mb-4 text-red-400">Delete Org Structure</h3>
+                        <p className="mb-4 text-gray-300 break-words">To confirm deletion, enter the org structure ID: <span className="font-mono text-blue-300">{orgStructure.id}</span></p>
+                        <input
+                            className="w-full border border-gray-700 px-3 py-2 text-sm bg-gray-800 text-gray-100 mb-4"
+                            placeholder="Enter org structure ID to confirm"
+                            value={deleteInput}
+                            onChange={e => setDeleteInput(e.target.value)}
+                            disabled={deleting}
+                        />
+                        <div className="flex flex-col sm:flex-row justify-between gap-2 mt-4">
+                            <button
+                                className="px-4 py-2 bg-gray-800 text-gray-200 hover:bg-gray-700 transition order-2 sm:order-1"
+                                onClick={() => { setShowDeleteModal(false); setDeleteInput(""); }}
+                                disabled={deleting}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                className="px-4 py-2 bg-red-700 text-white hover:bg-red-800 transition font-semibold order-1 sm:order-2"
+                                onClick={handleDeleteOrgStructure}
+                                disabled={deleting}
+                            >
+                                {deleting ? "Deleting..." : "Confirm Delete"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
-} 
+}
