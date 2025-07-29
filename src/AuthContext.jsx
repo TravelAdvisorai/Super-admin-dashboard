@@ -5,57 +5,66 @@ import { doc, getDoc } from 'firebase/firestore';
 
 const AuthContext = createContext();
 
+export function useAuth() {
+    return useContext(AuthContext);
+}
+
 export function AuthProvider({ children }) {
     const [user, setUser] = useState(null);
     const [role, setRole] = useState(null);
     const [organizationId, setOrganizationId] = useState(null);
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(true); // Start in a loading state
     const [error, setError] = useState(null);
 
     useEffect(() => {
+        // onAuthStateChanged listens for login/logout events and runs on initial load
         const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-            setLoading(true);
-            setUser(firebaseUser);
             if (firebaseUser) {
-                // Fetch admin boolean and organizationId from user_directory
+                setUser(firebaseUser);
                 try {
-                    const userRef = doc(db, 'user_directory', firebaseUser.email);
-                    const userSnap = await getDoc(userRef);
-                    if (userSnap.exists()) {
-                        const data = userSnap.data();
-                        if (data.superadmin === true) {
-                            setRole('superadmin');
-                        } else if (data.admin === true) {
-                            setRole('admin');
-                        } else {
-                            setRole('employee');
-                        }
-                        setOrganizationId(data.organizationId || null);
+                    // Fetch custom user data (like role) from Firestore
+                    const userDocRef = doc(db, 'user_directory', firebaseUser.email);
+                    const userDocSnap = await getDoc(userDocRef);
+
+                    if (userDocSnap.exists()) {
+                        const userData = userDocSnap.data();
+                        // Determine role based on flags in the user document
+                        const userRole = userData.superadmin ? 'superadmin' : (userData.admin ? 'admin' : 'employee');
+                        setRole(userRole);
+                        setOrganizationId(userData.organizationId || null);
                     } else {
-                        setRole('employee');
+                        // Handle case where user is authenticated but not in our database
+                        setRole('employee'); // Default to the lowest privilege
                         setOrganizationId(null);
                     }
                 } catch (e) {
-                    console.log(e);
+                    console.error("Failed to fetch user data:", e);
+                    // Default to lowest privilege on error
                     setRole('employee');
                     setOrganizationId(null);
+                    setError("Could not verify user role.");
                 }
             } else {
+                // User is logged out, clear all session data
+                setUser(null);
                 setRole(null);
                 setOrganizationId(null);
             }
+            // Finished initial auth check, set loading to false
             setLoading(false);
         });
+
+        // Cleanup subscription on component unmount
         return () => unsubscribe();
-    }, []);
+    }, []); // Empty array ensures this effect runs only once on mount
 
     const login = async () => {
         setError(null);
         try {
             await signInWithPopup(auth, provider);
         } catch (e) {
-            console.log(e);
-            setError('Login failed');
+            console.error("Login failed:", e);
+            setError('Login failed. Please try again.');
         }
     };
 
@@ -64,18 +73,16 @@ export function AuthProvider({ children }) {
         try {
             await signOut(auth);
         } catch (e) {
-            console.log(e);
-            setError('Logout failed');
+            console.error("Logout failed:", e);
+            setError('Logout failed. Please try again.');
         }
     };
 
+    const value = { user, role, organizationId, loading, login, logout, error };
+
     return (
-        <AuthContext.Provider value={{ user, role, organizationId, loading, login, logout, error }}>
+        <AuthContext.Provider value={value}>
             {children}
         </AuthContext.Provider>
     );
 }
-
-export function useAuth() {
-    return useContext(AuthContext);
-} 
