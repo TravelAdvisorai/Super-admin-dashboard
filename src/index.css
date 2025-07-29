@@ -1,3 +1,23 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* --- Custom Global Scrollbar Styles --- */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #111827; /* A darker background for the track */
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: #1d4ed8; /* A nice blue that matches the theme */
+  border-radius: 10px;
+  border: 2px solid #111827; /* Creates a padding effect */
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: #2563eb; /* A brighter blue on hover */
+}
